@@ -2,15 +2,33 @@ import re
 
 
 class Combo:
-    def __init__(self, moves, preserves_vt=False):
+    def __init__(self, moves, connections, preserves_vt=False):
         self.preserves_vt = preserves_vt
         self.moves = moves
+        self.connections = connections
         self.bars_spent = 0
         for move in self.moves:
             if move.is_EX:
                 self.bars_spent += 1
-            elif move.is_super:
+            elif move.is_ca:
                 self.bars_spent += 3
+
+    def extend(self, move, cancel=False):
+        return Combo(self.moves+[move], self.connections+[('cancel' if cancel else 'link')], preserves_vt=self.preserves_vt and not move.is_vt)
+
+    def advantage_on_hit(self, counterhit=False, cancel=False):
+        extra_stuff = 0
+        advantage = 0
+        connections = self.connections+['cancel' if cancel else 'link']
+        for i in range(-1, -len(self.moves)-1, -1):
+            move = self.moves[i]
+            connection = connections[i]
+            if move.causes_hit:
+                advantage = (move.adv_on_cancel if connection == 'cancel' else move.adv_on_hit)
+                break
+            else:
+                extra_stuff += move.startup
+        return advantage - extra_stuff
 
     def damage(self, counterhit=False, life=1000, max_life=1000, scaling=1):
         total_damage = 0
@@ -45,31 +63,34 @@ def combo_filter(list_of_combos, move_rules, max_bars=3):
 
 def generate_combos(character, max_length=5, max_bars=3, have_vt=False):
     combos = []
-    vt = next(x for x in character.moves if x.name == 'VT')
     for l in range(1, max_length + 1):
         combos_of_length_l = []
         for move in character.moves:
             if l == 1:
-                combos_of_length_l.append(Combo([move], preserves_vt=True))
+                combos_of_length_l.append(Combo([move], [], preserves_vt=True))
             else:
                 for c in combos_of_length_l_minus_1:
                     last_move = c.moves[-1]
-                    if \
-                                            move.startup < last_move.adv_on_hit or \
-                                    (
-                                                    last_move.is_special_cancellable and
-                                                    move.is_special_move and
-                                                    move.startup < last_move.adv_on_cancel
-                                    ) \
-                            :
-                        combos_of_length_l.append(Combo(c.moves + [move]))
-                    elif last_move.is_vt_cancellable and have_vt and c.preserves_vt and vt.startup + move.startup < last_move.adv_on_cancel:
-                        combos_of_length_l.append(Combo(c.moves + [vt, move], preserves_vt=False))
-
+                    if last_move.is_special_cancellable and move.is_special_move:
+                        advantage = c.advantage_on_hit(cancel=True)
+                        cancel = True
+                    elif last_move.is_vt_cancellable and move.is_vt:
+                        advantage = c.advantage_on_hit(cancel=True)
+                        cancel = True
+                    elif last_move.is_ca_cancellable and move.is_ca:
+                        advantage = c.advantage_on_hit(cancel=True)
+                        cancel = True
+                    else:
+                        advantage = c.advantage_on_hit()
+                        cancel = False
+                    if move.startup < advantage:
+                        derp = c.extend(move, cancel=cancel)
+                        combos_of_length_l.append(derp)
 
         combos_of_length_l = combo_filter(combos_of_length_l, character.move_rules, max_bars=max_bars)
         combos.extend(combos_of_length_l)
         combos_of_length_l_minus_1 = combos_of_length_l
+    combos = [c for c in combos if c.moves[-1].causes_hit]
     combos.sort(key=lambda x: x.damage()[0])
 
     for x in combos: print x, x.damage()[0]
@@ -77,15 +98,22 @@ def generate_combos(character, max_length=5, max_bars=3, have_vt=False):
 
 
 class Move:
+
+    def __str__(self):
+        return self.name
+
     def __init__(self, name, life_damages, startup, adv_on_block, adv_on_hit,
                  stun_damages=None,
                  critical_art=False,
-                 is_EX = False,
+                 is_ex = False,
                  adv_on_cancel=None,
                  is_special_move=False,
                  is_special_cancellable=False,
                  is_vt_cancellable=False,
-                 vt_version=None):
+                 is_ca_cancellable=False,
+                 is_vt = False,
+                 vt_version=None,
+                 causes_hit=True):
         self.name = name
         self.startup = startup
         self.life_damages = life_damages
@@ -93,7 +121,10 @@ class Move:
         self.adv_on_hit = adv_on_hit
         self.is_special_cancellable = is_special_cancellable
         self.is_vt_cancellable = is_vt_cancellable
+        self.is_ca_cancellable = is_ca_cancellable
+        self.is_vt = is_vt
         self.vt_version = vt_version
+        self.causes_hit = causes_hit
         # self.adv_on_ch = adv_on_ch
         self.is_special_move = is_special_move
         if adv_on_cancel is None:
@@ -104,13 +135,13 @@ class Move:
             self.stun_damages = [0 for _ in life_damages]
         else:
             self.stun_damages = stun_damages
-        self.is_super = critical_art
-        self.is_EX = is_EX
+        self.is_ca = critical_art
+        self.is_EX = is_ex
 
     def damage(self, hit_scaling, counterhit=False, life=1000, max_life=1000):
         if hit_scaling < .1:
             hit_scaling = .1
-        if hit_scaling < .5 and self.is_super:
+        if hit_scaling < .5 and self.is_ca:
             hit_scaling = .5
         hits = self.life_damages
         total_life_damage = 0
@@ -175,16 +206,16 @@ for move in [
     Move('legs_LK', [20] * 4, 4, -8, 3, is_special_move=True),
     Move('legs_MK', [20] * 5, 9, -9, 2, is_special_move=True),
     Move('legs_HK', [20] * 6, 13, -10, 1, is_special_move=True),
-    Move('legs_EX', [10] * 9 + [50], 4, -2, 0, is_special_move=True, is_EX=True),
+    Move('legs_EX', [10] * 9 + [50], 4, -2, 0, is_special_move=True, is_ex=True),
     Move('kikou_LP', [60], 12, -6, 0, is_special_move=True),
     Move('kikou_MP', [60], 10, -5, -1, is_special_move=True),
     Move('kikou_HP', [60], 8, -4, -2, is_special_move=True),
-    Move('kikou_EX', [50] * 2, 10, 1, 4, is_special_move=True, is_EX=True),
+    Move('kikou_EX', [50] * 2, 10, 1, 4, is_special_move=True, is_ex=True),
     Move('SBK_LK', [20] * 4 + [40], 8, -6, 0, is_special_move=True),
     Move('SBK_MK', [25] + [15] * 5 + [40], 14, -8, 0, is_special_move=True),
     Move('SBK_HK', [10] + [15] * 7 + [45], 21, -10, 0, is_special_move=True),
-    Move('SBK_EX', [30] * 4 + [50], 4, -12, 0, is_special_move=True, is_EX=True),
-    Move('VT', [0], 4, 0, 0),
+    Move('SBK_EX', [30] * 4 + [50], 4, -12, 0, is_special_move=True, is_ex=True),
+    Move('VT', [0], 4, 0, 0, causes_hit=False, is_vt=True),
     Move('CA', [30] + [20] + [5] * 34 + [120], 4, 0, 0, critical_art=True)
 
     # Move('VT_cHP', [55, 5, 5, 35, 5, 5]),
@@ -395,7 +426,7 @@ Guile = Character()
 # Chun_Li.add_combo('DP punish 2',
 #                   ['HK', 'MP', 'cMK', 'SBK_MK'])
 #
-generate_combos(Chun_Li, max_bars=4, max_length=6, have_vt=True)
+generate_combos(Chun_Li, max_bars=0, max_length=4, have_vt=True)
 
 # print combo_damage([jHP, hands, kikou_EX, poke, VT, VT_hands, VT_SBK_HK], 1)
 # Nash.add_combo('derp', ['jHK', 'cMP', 'MP', 'Sonic Scythe MK', 'CA'])
